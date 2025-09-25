@@ -10,4 +10,5 @@ pydantic<2.8
 joblib
 pytest
 s3fs
+imangum
 

@@ -65,9 +65,11 @@ curl -X POST localhost:8000/score_lead -H "Content-Type: application/json" -d '{
 
 - Bake artifacts into the image for fastest startup (recommended):
   - During Docker build, run:
+
     ```bash
     make data && PYTHONPATH=. make indices
     ```
+
   - This produces `artifacts/` (FAISS indices, scaler/PCA, feature_meta, emails) inside the image.
 - Offline mode works (no Hugging Face). The text embedder falls back to a hashing vectorizer.
 - Container listens on port 8000 with health at `/health`.
@@ -125,6 +127,74 @@ docker push $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
 - ECS Fargate: choose for VPC integration and fine-grained scaling.
 - Lambda: choose for bursty workloads with provisioned concurrency to tame cold starts.
 
+### Lambda deployment guide (step-by-step)
+
+1) Build artifacts from S3
+
+- Ensure local AWS creds (AWS_PROFILE/keys) and `s3fs` installed (already in requirements).
+- Point to your parquet on S3 (or a view/export that is filtered to current rows if you use SCD2):
+
+```bash
+PYTHONPATH=. python scripts/build_indices.py \
+  --input-path s3://your-bucket/path/dim_client.parquet \
+  --text-cols first_name,last_name,job_title,bio \
+  --cat-cols industry,country \
+  --num-cols company_size,web_activity_score,email_engagement_score
+# Output is written to artifacts/
+```
+
+Notes:
+
+- For SCD Type 2, build from rows where is_current=true (recommended). Create an Athena/ETL export that materializes a parquet of current rows, then reference that S3 path above.
+
+2) Package the Lambda (zip-based)
+
+```bash
+rm -rf build && mkdir -p build
+pip install -r requirements.txt -t build
+cp -R leadgen build/
+cp -R artifacts build/
+cp -R leadgen/service/lambda_handler.py build/leadgen/service/
+cd build && zip -r ../leadgen-embeddings-lambda.zip . && cd -
+```
+
+Key settings for the function:
+
+- Handler: `leadgen.service.lambda_handler.handler`
+- Runtime: Python 3.11 (arm64)
+- Memory: ≥ 2048 MB (3072 MB recommended)
+- Timeout: ~30s
+- Ephemeral storage: ≥ 1024 MB (2048 MB recommended)
+- Provisioned Concurrency: ≥ 1 to reduce cold starts
+
+3) Create the Lambda and upload the zip
+
+- Console or IaC: create the function with the above settings and upload `leadgen-embeddings-lambda.zip`.
+- If you prefer a container image, bake code+artifacts into an image and use that instead.
+
+4) Wire API Gateway (or invoke from pipelines)
+
+- HTTP API with ANY `/{proxy+}` to the Lambda (Mangum routes FastAPI correctly).
+- Test:
+  - GET `/health` → {"status":"ok"}
+  - POST `/score_lead` with a JSON body
+
+5) IAM and access
+
+- If artifacts are baked into the package/image: no S3 read needed at runtime.
+- If you want to load artifacts from S3 on cold start (not required here), grant S3 read and add your fetch logic.
+
+6) Operations: refresh cadence and dedup
+
+- Rebuild artifacts on a schedule (EventBridge → CodeBuild) to reflect new/current records.
+- If using SCD2, build from `is_current=true` snapshot (as in step 1).
+- Email duplicate short-circuit is built-in and works immediately between rebuilds.
+- Optional: maintain a small online set (email or normalized name+company) in DynamoDB/S3 to block duplicates instantly.
+
+7) Security
+
+- Restrict API with auth (IAM/authorizer) or private VPC integration if required.
+
 ## Deployment diagrams (Mermaid)
 
 ### Lambda (API Gateway + Lambda + optional EFS)
@@ -149,6 +219,7 @@ flowchart TD
 ```
 
 Notes:
+
 - Indices live in memory per warm instance; use Provisioned Concurrency to reduce cold starts.
 - Bake artifacts into image or fetch to /tmp; EFS can be mounted for large models.
 
@@ -176,6 +247,7 @@ flowchart TD
 ```
 
 Notes:
+
 - Scale tasks horizontally; each task holds its own in-memory FAISS.
 - Prefer baking artifacts to image for fast container start.
 
@@ -222,7 +294,7 @@ PYTHONPATH=. python scripts/build_indices.py
 ```
 
 Notes:
+
 - Only columns you provide are used; missing columns are zero-filled.
 - Emails are read if present in the dataset and used for duplicate short-circuiting (exact match) at API time.
 - If you want to use name/company/address as text, include them in `--text-cols`; they’ll be concatenated.
-
