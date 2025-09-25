@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -29,18 +29,41 @@ def apply_frequency_encoding(series: pd.Series, mapping: Dict[str, float]) -> np
     return series.fillna("").astype(str).map(mapping).fillna(0.0).to_numpy(dtype=np.float32)
 
 
-def preprocess_dataframe(df: pd.DataFrame) -> Tuple[pd.Series, np.ndarray, Dict[str, Dict[str, float]]]:
-    text_series = df.apply(lambda r: make_text_blob(r.get("job_title", ""), r.get("bio", "")), axis=1)
+def preprocess_dataframe(
+    df: pd.DataFrame,
+    text_cols: Optional[List[str]] = None,
+    categorical_cols: Optional[List[str]] = None,
+    numeric_cols: Optional[List[str]] = None,
+) -> Tuple[pd.Series, np.ndarray, Dict[str, Dict[str, float]]]:
+    text_cols = text_cols or TEXT_COLS
+    categorical_cols = categorical_cols or CATEGORICAL_COLS
+    numeric_cols = numeric_cols or NUMERIC_COLS
+
+    # Text blob from arbitrary columns (fallback to job_title+bio style)
+    if set(["job_title", "bio"]).issubset(text_cols):
+        text_series = df.apply(lambda r: make_text_blob(r.get("job_title", ""), r.get("bio", "")), axis=1)
+    else:
+        def _join_text(row: pd.Series) -> str:
+            parts = [str(row.get(c, "")) for c in text_cols]
+            return ". ".join([p for p in parts if p]).strip()
+        text_series = df.apply(_join_text, axis=1)
 
     encoders: Dict[str, Dict[str, float]] = {}
     features: List[np.ndarray] = []
-    for col in CATEGORICAL_COLS:
-        mapping = frequency_encode(df[col] if col in df.columns else pd.Series([""] * len(df)))
+    for col in categorical_cols:
+        series = df[col] if col in df.columns else pd.Series([""] * len(df))
+        mapping = frequency_encode(series)
         encoders[col] = mapping
-        features.append(apply_frequency_encoding(df[col] if col in df.columns else pd.Series([""] * len(df)), mapping))
+        features.append(apply_frequency_encoding(series, mapping))
 
-    numeric = df[NUMERIC_COLS].astype(np.float32).to_numpy(copy=False) if set(NUMERIC_COLS).issubset(df.columns) else np.zeros((len(df), len(NUMERIC_COLS)), dtype=np.float32)
+    if len(numeric_cols) > 0:
+        if set(numeric_cols).issubset(df.columns):
+            numeric = df[numeric_cols].astype(np.float32).to_numpy(copy=False)
+        else:
+            numeric = np.zeros((len(df), len(numeric_cols)), dtype=np.float32)
+        X = np.column_stack(features + [numeric]).astype(np.float32) if features else numeric.astype(np.float32)
+    else:
+        X = np.column_stack(features).astype(np.float32) if features else np.zeros((len(df), 0), dtype=np.float32)
 
-    X = np.column_stack(features + [numeric]).astype(np.float32)
     return text_series, X, encoders
 

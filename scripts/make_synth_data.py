@@ -77,6 +77,7 @@ KEYWORDS = ["portfolio", "allocator", "trading", "execution", "Kubernetes", "com
 
 
 def sample_from_weighted(items: List[Tuple[str, float]], n: int) -> List[str]:
+    # Separate the labels and their associated weights
     labels, weights = zip(*items)
     probs = np.array(weights) / np.sum(weights)
     idx = np.random.choice(len(labels), size=n, p=probs)

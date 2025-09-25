@@ -125,3 +125,104 @@ docker push $AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
 - ECS Fargate: choose for VPC integration and fine-grained scaling.
 - Lambda: choose for bursty workloads with provisioned concurrency to tame cold starts.
 
+## Deployment diagrams (Mermaid)
+
+### Lambda (API Gateway + Lambda + optional EFS)
+
+```mermaid
+flowchart TD
+  C[Client] -->|HTTPS| APIGW[API Gateway]
+  APIGW --> L[Lambda - FastAPI via ASGI adapter]
+  subgraph Runtime
+    L -->|on cold start| IMG[Container Image]
+    L -->|load indices| TMP[tmp ephemeral]
+    L --> RAM[FAISS in RAM]
+  end
+  subgraph Durable Storage
+    S3[S3 artifacts]
+    EFS[EFS optional]
+  end
+  IMG -. baked artifacts .-> L
+  L -. optional download .-> S3
+  L -. optional mount .-> EFS
+  L -->|JSON scores| APIGW --> C
+```
+
+Notes:
+- Indices live in memory per warm instance; use Provisioned Concurrency to reduce cold starts.
+- Bake artifacts into image or fetch to /tmp; EFS can be mounted for large models.
+
+### ECS Fargate (ALB + ECS Service)
+
+```mermaid
+flowchart TD
+  C[Client] -->|HTTPS| ALB[Application Load Balancer]
+  ALB --> T1[Task 1 - Uvicorn FastAPI]
+  ALB --> T2[Task 2 - Uvicorn FastAPI]
+  subgraph Tasks
+    T1 --> RAM1[FAISS in RAM]
+    T2 --> RAM2[FAISS in RAM]
+  end
+  subgraph Image_Artifacts[Image & Artifacts]
+    IMG[ECR Image]
+    S3[S3 artifacts]
+  end
+  IMG -. baked artifacts .-> T1
+  IMG -. baked artifacts .-> T2
+  T1 -. optional fetch .-> S3
+  T2 -. optional fetch .-> S3
+  T1 -->|JSON scores| ALB
+  T2 -->|JSON scores| ALB
+```
+
+Notes:
+- Scale tasks horizontally; each task holds its own in-memory FAISS.
+- Prefer baking artifacts to image for fast container start.
+
+### App Runner (managed HTTPS)
+
+```mermaid
+flowchart TD
+  C[Client] -->|HTTPS| AR[App Runner]
+  AR --> SVC[Container - Uvicorn FastAPI]
+  SVC --> RAM[FAISS in RAM]
+  SVC -. optional fetch .-> S3[S3 artifacts]
+  SVC -. baked artifacts .-> IMG[ECR Image]
+  SVC -->|JSON scores| AR --> C
+```
+
+## S3 ingestion and configurable columns
+
+- The index build script can read from local or S3 and lets you choose columns used for text/categorical/numeric features.
+- Install s3fs (already in requirements) and ensure your AWS credentials are available to pandas (env vars or instance role).
+
+Examples:
+
+```bash
+# Local parquet (default)
+PYTHONPATH=. python scripts/build_indices.py \
+  --input-path data/crm.parquet \
+  --text-cols job_title,bio \
+  --cat-cols industry,country \
+  --num-cols company_size,web_activity_score,email_engagement_score
+
+# S3 parquet
+PYTHONPATH=. python scripts/build_indices.py \
+  --input-path s3://my-bucket/path/to/dim_client.parquet \
+  --text-cols first_name,last_name,job_title,bio \
+  --cat-cols industry,country \
+  --num-cols company_size,web_activity_score,email_engagement_score
+
+# Using env vars instead of flags
+export LEADGEN_INPUT_PATH=s3://my-bucket/path/to/dim_client.parquet
+export LEADGEN_TEXT_COLS=first_name,last_name,job_title,bio
+export LEADGEN_CAT_COLS=industry,country
+export LEADGEN_NUM_COLS=company_size,web_activity_score,email_engagement_score
+PYTHONPATH=. python scripts/build_indices.py
+```
+
+Notes:
+- Only columns you provide are used; missing columns are zero-filled.
+- Emails are read if present in the dataset and used for duplicate short-circuiting (exact match) at API time.
+- If you want to use name/company/address as text, include them in `--text-cols`; they’ll be concatenated.
+

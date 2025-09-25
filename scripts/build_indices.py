@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import argparse
+import os
 
 import joblib
 import numpy as np
@@ -17,16 +19,28 @@ from leadgen.scoring.scorer import l2_normalize
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Build embeddings and FAISS indices")
+    parser.add_argument("--input-path", default=str(DATA_DIR / "crm.parquet"), help="Local path or s3:// URL to a parquet file")
+    parser.add_argument("--text-cols", default=",".join(["job_title","bio"]), help="Comma-separated text columns")
+    parser.add_argument("--cat-cols", default=",".join(["industry","country"]), help="Comma-separated categorical columns")
+    parser.add_argument("--num-cols", default=",".join(["company_size","web_activity_score","email_engagement_score"]), help="Comma-separated numeric columns")
+    args = parser.parse_args()
+
+    input_path = os.environ.get("LEADGEN_INPUT_PATH", args.input_path)
+    text_cols = os.environ.get("LEADGEN_TEXT_COLS", args.text_cols).split(",") if os.environ.get("LEADGEN_TEXT_COLS", args.text_cols) else []
+    cat_cols = os.environ.get("LEADGEN_CAT_COLS", args.cat_cols).split(",") if os.environ.get("LEADGEN_CAT_COLS", args.cat_cols) else []
+    num_cols = os.environ.get("LEADGEN_NUM_COLS", args.num_cols).split(",") if os.environ.get("LEADGEN_NUM_COLS", args.num_cols) else []
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     (ARTIFACTS_DIR / "text_model").mkdir(parents=True, exist_ok=True)
     (ARTIFACTS_DIR / "tabular").mkdir(parents=True, exist_ok=True)
     (ARTIFACTS_DIR / "faiss").mkdir(parents=True, exist_ok=True)
 
-    crm = pd.read_parquet(DATA_DIR / "crm.parquet")
+    # Accept local or s3 path (requires s3fs installed)
+    crm = pd.read_parquet(input_path)
     # Precompute normalized email set for duplicate checks at service time
     emails = set(crm.get("email", pd.Series([], dtype=str)).map(normalize_email).tolist())
 
-    text_series, X_tab, encoders = preprocess_dataframe(crm)
+    text_series, X_tab, encoders = preprocess_dataframe(crm, text_cols=text_cols, categorical_cols=cat_cols, numeric_cols=num_cols)
 
     text_model = TextEmbedder()
     E_text = text_model.encode(text_series.tolist())
