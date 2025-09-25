@@ -1,0 +1,12 @@
+numpy
+pandas
+pyarrow
+scikit-learn
+sentence-transformers
+faiss-cpu
+fastapi
+uvicorn
+pydantic<2.8
+joblib
+pytest
+

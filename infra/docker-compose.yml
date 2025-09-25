@@ -1,0 +1,20 @@
+version: '3.9'
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ..:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+  # TODO: Add optional pgvector service for Day-2
+  # pgvector:
+  #   image: ankane/pgvector
+  #   environment:
+  #     POSTGRES_PASSWORD: postgres
+  #   ports:
+  #     - "5432:5432"
+
